@@ -5,10 +5,8 @@ library(tidyverse)
 library(data.table)
 library(parallel)
 library(tidytext)
-
-my_stop_words <- stop_words
-substr(my_stop_words$word, 1, 1) <- toupper(substr(my_stop_words$word, 1, 1))
-my_stop_words <- dplyr::bind_rows(stop_words, my_stop_words)
+library(textcat)
+library(stopwords)
 
 # Load TRAIN and TEST -----------------------------------------------------
 
@@ -17,6 +15,46 @@ train <- data.table::fread("train.csv") %>%
 
 test <- data.table::fread("sample_submission.csv") %>% 
   dplyr::mutate(file_name = stringr::str_c("test/", Id, ".json"))
+
+# Stop Words --------------------------------------------------------------
+
+include_words <- stringr::str_extract_all(string = train$cleaned_label,
+                                          pattern = "\\w+") %>%
+  unlist() %>%
+  unique() %>%
+  tolower() %>%
+  tibble::tibble(word = .)
+
+labels <- include_words
+
+substr(include_words$word, 1, 1) <- toupper(substr(include_words$word, 1, 1))
+
+labels <- dplyr::bind_rows(labels, include_words) %>%
+  dplyr::distinct()
+
+stop_words_1 <- stop_words %>%
+  dplyr::select(word)
+
+substr(stop_words_1$word, 1, 1) <- toupper(substr(stop_words_1$word, 1, 1))
+
+stop_words_1 <- dplyr::bind_rows(dplyr::select(stop_words, word), stop_words_1) %>%
+  dplyr::anti_join(labels, by = "word")
+
+stop_words_2 <- stopwords(language = "en") %>%
+  tibble::tibble(word = .)
+
+substr(stop_words_2$word, 1, 1) <- toupper(substr(stop_words_2$word, 1, 1))
+
+stop_words_2 <- dplyr::bind_rows(stopwords(language = "en") %>%
+                                   tibble::tibble(word = .), stop_words_2) %>%
+  dplyr::anti_join(labels, by = "word")
+
+my_stop_words <- dplyr::bind_rows(stop_words_1, stop_words_2) %>%
+  dplyr::distinct()
+
+saveRDS(my_stop_words, "my_stop_words.rds")
+
+my_stop_words <- readRDS("my_stop_words.rds")
 
 # Read JSON ---------------------------------------------------------------
 
@@ -45,51 +83,53 @@ read_json <- function(file_name) {
 #   unique()
 # saveRDS(char_vec, "char_vec.rds")
 
-train_res <- readRDS("train_res.rds")
-
-char_vec <- readRDS("char_vec.rds")
-
-char_rm <- char_vec[!(char_vec %in% c(" ", ".", "(", ")", ",", ":"))]
+# train_res <- readRDS("train_res.rds")
 
 # Read and Clean ----------------------------------------------------------
 
-read_clean_json <- function(file_name, char_rm) {
+read_clean_json <- function(file_name) {
   
   doc <- jsonlite::fromJSON(file_name)
   
   text <- stringr::str_c(doc$text, collapse = " ") %>% 
     stringr::str_remove_all(string = ., pattern = "[^\\w\\.\\s\\(\\)\\,\\:]") %>% 
     stringr::str_remove_all(string = ., pattern = "\n") %>% 
+    stringr::str_remove_all(string = ., pattern = "\\d") %>% 
+    stringr::str_remove_all(string = ., pattern = "\\(\\)") %>% 
+    stringr::str_replace_all(string = ., pattern = "\\s+", replacement = " ") %>% 
     tibble::tibble(text = .)
   
   res_text <- text %>% 
     tidytext::unnest_tokens(output = word,
                             input = text,
                             token = stringr::str_split, pattern = " ",
-                            to_lower = FALSE) %>% 
-    dplyr::anti_join(my_stop_words, by = "word") %>% 
-    dplyr::distinct()
+                            to_lower = FALSE)
+    #dplyr::anti_join(my_stop_words, by = "word")
   
   clean_text <- stringr::str_c(res_text$word, collapse = " ")
   
-  res <- tibble::tibble(file_name = !!file_name, text = clean_text)
+  language <- textcat(clean_text)
+  
+  res <- tibble::tibble(file_name = file_name, text = clean_text, lan = language)
   
   return(res)
   
 }
 
-# stringr::str_extract_all(tt, "\\W") %>% table %>% data.frame %>% View()
+train_res_clean <- parallel::mclapply(unique(train$file_name)[1:20],
+                                      read_clean_json,
+                                      mc.cores = parallel::detectCores()) %>%
+  dplyr::bind_rows()
+saveRDS(train_res_clean, "train_res_clean.rds")
 
-# Read all TEST documents -------------------------------------------------
+train_res_clean <- readRDS("train_res_clean.rds")
 
-test_res <- readRDS("test_res.rds")
 
-# test_res <- parallel::mclapply(unique(test$file_name),
-#                           read_json,
-#                           mc.cores = parallel::detectCores()) %>% 
-#   dplyr::bind_rows()
-
-# saveRDS(test_res, "test_res.rds")
+test_res_clean <- parallel::mclapply(unique(test$file_name),
+                                      read_clean_json,
+                                      mc.cores = parallel::detectCores()) %>%
+  dplyr::bind_rows()
+# saveRDS(test_res_clean, "test_res_clean.rds")
 
 # Detect function ---------------------------------------------------------
 
