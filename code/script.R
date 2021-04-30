@@ -5,152 +5,219 @@ library(tidyverse)
 library(data.table)
 library(parallel)
 library(tidytext)
-library(textcat)
-library(stopwords)
 
 # Load TRAIN and TEST -----------------------------------------------------
 
-train <- data.table::fread("train.csv") %>% 
-  dplyr::mutate(file_name = stringr::str_c("train/", Id, ".json"))
+train <- data.table::fread("train.csv")
 
-test <- data.table::fread("sample_submission.csv") %>% 
-  dplyr::mutate(file_name = stringr::str_c("test/", Id, ".json"))
+# Read and Clean ----------------------------------------------------------
 
-# Stop Words --------------------------------------------------------------
-
-include_words <- stringr::str_extract_all(string = train$cleaned_label,
-                                          pattern = "\\w+") %>%
-  unlist() %>%
-  unique() %>%
-  tolower() %>%
-  tibble::tibble(word = .)
-
-labels <- include_words
-
-substr(include_words$word, 1, 1) <- toupper(substr(include_words$word, 1, 1))
-
-labels <- dplyr::bind_rows(labels, include_words) %>%
-  dplyr::distinct()
-
-stop_words_1 <- stop_words %>%
-  dplyr::select(word)
-
-substr(stop_words_1$word, 1, 1) <- toupper(substr(stop_words_1$word, 1, 1))
-
-stop_words_1 <- dplyr::bind_rows(dplyr::select(stop_words, word), stop_words_1) %>%
-  dplyr::anti_join(labels, by = "word")
-
-stop_words_2 <- stopwords(language = "en") %>%
-  tibble::tibble(word = .)
-
-substr(stop_words_2$word, 1, 1) <- toupper(substr(stop_words_2$word, 1, 1))
-
-stop_words_2 <- dplyr::bind_rows(stopwords(language = "en") %>%
-                                   tibble::tibble(word = .), stop_words_2) %>%
-  dplyr::anti_join(labels, by = "word")
-
-my_stop_words <- dplyr::bind_rows(stop_words_1, stop_words_2) %>%
-  dplyr::distinct()
-
-saveRDS(my_stop_words, "my_stop_words.rds")
-
-my_stop_words <- readRDS("my_stop_words.rds")
-
-# Read JSON ---------------------------------------------------------------
-
-read_json <- function(file_name) {
+read_clean_title <- function(dataset_title) {
   
-  doc <- jsonlite::fromJSON(file_name)
+  text <- stringr::str_c(dataset_title, collapse = " ") %>% 
+    stringr::str_remove_all(string = ., pattern = "[^\\w\\.\\s\\(\\)]") %>% 
+    stringr::str_remove_all(string = ., pattern = "\n") %>% 
+    stringr::str_remove_all(string = ., pattern = "\\d") %>% 
+    stringr::str_replace_all(string = ., pattern = "\\s+", replacement = " ")
   
-  text <- stringr::str_c(tolower(doc$text), collapse = " ")
-  
-  res <- tibble::tibble(file_name = !!file_name, text = text)
+  res <- tibble::tibble(dataset_title = dataset_title, cleaned_title = text)
   
   return(res)
   
 }
 
-# Read all TRAIN documents ------------------------------------------------
-
-# train_res <- parallel::mclapply(unique(train$file_name),
-#                           read_json,
-#                           mc.cores = parallel::detectCores()) %>% 
-#   dplyr::bind_rows()
-# saveRDS(train_res, "train_res.rds")
-
-# char_vec <- stringr::str_extract_all(string = train_res$text, pattern = "\\W") %>% 
-#   unlist() %>%
-#   unique()
-# saveRDS(char_vec, "char_vec.rds")
-
-# train_res <- readRDS("train_res.rds")
-
-# Read and Clean ----------------------------------------------------------
-
-read_clean_json <- function(file_name) {
+read_clean_label <- function(dataset_label) {
   
-  doc <- jsonlite::fromJSON(file_name)
-  
-  text <- stringr::str_c(doc$text, collapse = " ") %>% 
-    stringr::str_remove_all(string = ., pattern = "[^\\w\\.\\s\\(\\)\\,\\:]") %>% 
+  text <- stringr::str_c(dataset_label, collapse = " ") %>% 
+    stringr::str_remove_all(string = ., pattern = "[^\\w\\.\\s\\(\\)]") %>% 
     stringr::str_remove_all(string = ., pattern = "\n") %>% 
     stringr::str_remove_all(string = ., pattern = "\\d") %>% 
-    stringr::str_remove_all(string = ., pattern = "\\(\\)") %>% 
-    stringr::str_replace_all(string = ., pattern = "\\s+", replacement = " ") %>% 
-    tibble::tibble(text = .)
+    stringr::str_replace_all(string = ., pattern = "\\s+", replacement = " ")
   
-  res_text <- text %>% 
+  res <- tibble::tibble(dataset_label = dataset_label, cleaned_label = text)
+  
+  return(res)
+  
+}
+
+label_df <- train %>% 
+  dplyr::select(dataset_title, dataset_label, cleaned_label) %>% 
+  dplyr::distinct()
+
+label_title_clean <- parallel::mclapply(unique(label_df$dataset_title),
+                                        read_clean_title,
+                                        mc.cores = parallel::detectCores()) %>%
+  dplyr::bind_rows()
+
+label_title_label <- parallel::mclapply(unique(label_df$dataset_label),
+                                        read_clean_label,
+                                        mc.cores = parallel::detectCores()) %>%
+  dplyr::bind_rows()
+
+label_clean <- label_df %>% 
+  dplyr::rename(output_label = cleaned_label) %>% 
+  dplyr::left_join(label_title_clean, by = "dataset_title") %>% 
+  dplyr::left_join(label_title_label, by = "dataset_label") %>% 
+  dplyr::select(dataset_title, cleaned_title, dataset_label, cleaned_label, 
+                output_label)
+
+read_clean_json <- function(Id) {
+  
+  publication <- data.table(jsonlite::fromJSON(paste0('train/', Id, '.json')))
+  
+  text <- stringr::str_c(publication$text, collapse = " ") %>% 
+    stringr::str_remove_all(string = ., pattern = "[^\\w\\.\\s\\(\\)]") %>% 
+    stringr::str_remove_all(string = ., pattern = "\n") %>% 
+    stringr::str_remove_all(string = ., pattern = "\\d") %>% 
+    stringr::str_replace_all(string = ., pattern = "\\s+", replacement = " ")
+  
+  res <- tibble::tibble(Id = Id, text = text)
+  
+  return(res)
+  
+}
+
+train_clean <- parallel::mclapply(unique(train$Id)[1:10],
+                                  read_clean_json,
+                                  mc.cores = parallel::detectCores()) %>%
+  dplyr::bind_rows()
+
+train <- train %>%
+  dplyr::left_join(train_clean, by = "Id") %>% 
+  dplyr::select(-cleaned_label) %>% 
+  dplyr::left_join(label_clean, by = c("dataset_title", "dataset_label"))
+
+saveRDS(train, "train.rds")
+
+# Rules -------------------------------------------------------------------
+
+set_ind <- function(ind, sub, add) {
+  
+  ind_df <- tibble::tibble(ind) %>% 
+    dplyr::mutate(ind_start = ind - sub,
+                  ind_stop = ind + add) %>% 
+    dplyr::mutate(ind_start = dplyr::if_else(ind_start < 0, 0, ind_start)) %>% 
+    dplyr::mutate(ind_stop = dplyr::if_else(ind_stop < 0, 0, ind_stop))
+  
+  return(ind_df)
+  
+}
+
+get_words <- function(ind, word_ind, temp_text) {
+  
+  res <- temp_text %>% 
+    dplyr::slice(word_ind$ind_start[ind]:word_ind$ind_stop[ind]) %>% 
+    dplyr::pull(word) %>% 
+    stringr::str_c(., collapse = " ") %>% 
+    stringr::str_replace_all(string = ., pattern = "\\s+", replacement = " ") %>%
+    stringr::str_remove_all(string = ., pattern = "\\. \\w+") %>%
+    stringr::str_remove_all(string = ., pattern = "\\.\\w+") %>% 
+    stringr::str_extract_all(string = ., pattern = "\\b[A-Z]\\w+|\\(|\\)") %>% 
+    unlist() %>% 
+    stringr::str_c(., collapse = " ") %>% 
+    tibble::tibble(res = .)
+  
+  return(res)
+  
+}
+
+get_words_text <- function(x, data, sub, add) {
+  
+  temp <- data %>% 
+    dplyr::filter(Id == data$Id[x]) 
+  
+  temp_text <- temp %>%
+    dplyr::select(text) %>% 
+    dplyr::slice(1) %>% 
     tidytext::unnest_tokens(output = word,
                             input = text,
                             token = stringr::str_split, pattern = " ",
                             to_lower = FALSE)
-    #dplyr::anti_join(my_stop_words, by = "word")
   
-  clean_text <- stringr::str_c(res_text$word, collapse = " ")
+  ind <- stringr::str_detect(string = temp_text$word, pattern = "data") %>% 
+    which
   
-  language <- textcat(clean_text)
+  word_ind <- set_ind(ind, sub = sub, add = add)
   
-  res <- tibble::tibble(file_name = file_name, text = clean_text, lan = language)
+  if(nrow(word_ind) > 0) {
+  res <- parallel::mclapply(1:nrow(word_ind),
+                            get_words,
+                            word_ind = word_ind,
+                            temp_text = temp_text,
+                            mc.cores = 1) %>%
+    dplyr::bind_rows() %>% 
+    distinct()
+  } else {
+    res <- tibble::tibble()
+  }
   
   return(res)
   
 }
 
-train_res_clean <- parallel::mclapply(unique(train$file_name)[1:20],
-                                      read_clean_json,
-                                      mc.cores = parallel::detectCores()) %>%
-  dplyr::bind_rows()
-saveRDS(train_res_clean, "train_res_clean.rds")
+data <- train %>% 
+  dplyr::distinct(file_name, .keep_all = TRUE)
 
-train_res_clean <- readRDS("train_res_clean.rds")
+res <- parallel::mclapply(1:nrow(data),
+                         get_words_text,
+                         data = data,
+                         sub = 5,
+                         add = 50,
+                         mc.cores = 8) %>%
+  dplyr::bind_rows() %>% 
+  distinct()
 
+saveRDS(res, "res.rds")
 
-test_res_clean <- parallel::mclapply(unique(test$file_name),
-                                      read_clean_json,
-                                      mc.cores = parallel::detectCores()) %>%
-  dplyr::bind_rows()
-# saveRDS(test_res_clean, "test_res_clean.rds")
-
-# Detect function ---------------------------------------------------------
-
-detect_word <- function(file_name, data) {
+new_labels <- res %>% 
+  dplyr::mutate(label = stringr::str_remove_all(string = res, pattern = "\\( \\)")) %>% 
+  dplyr::mutate(label = stringr::str_replace_all(string = label, pattern = "\\( ", replacement = "\\(")) %>% 
+  dplyr::mutate(label = stringr::str_replace_all(string = label, pattern = "\\) ", replacement = "\\)")) %>% 
+  dplyr::mutate(label = stringr::str_trim(string = label, side = "both")) %>% 
+  dplyr::filter(label != "") %>% 
+  dplyr::distinct(label, .keep_all = TRUE) %>% 
+  dplyr::mutate(char_len = nchar(label)) %>% 
+  dplyr::filter(char_len >= 10)
   
-  data <- train_res
-  file_name <- data$file_name[10]
+# Last step ---------------------------------------------------------------
+
+train_labels <- c(unique(train$cleaned_label))
+
+predict <- function(Id, data, train_labels){
   
   text <- data %>% 
-    dplyr::filter(file_name == !!file_name) %>% 
+    dplyr::filter(Id == !!Id) %>% 
+    dplyr::select(text) %>% 
+    dplyr::distinct() %>% 
     dplyr::pull(text)
+
+  labels <- vector()
   
-  stringr::str_detect(string = text, pattern = "data")
+  for (label in train_labels) {
+    if (sum(grepl(label, text)) > 0) {
+      labels <- c(labels, label)
+    }
+  }
   
-  stringr::str_extract_all(string = text, pattern = "(\\w+.){2}data.(\\w+....){11}")
+  res <- tibble::tibble(Id = Id, PredictionString = tolower(paste(labels, collapse = '|')))
   
-  # stringr::str_detect(string = text, pattern = "dataset")
-  # stringr::str_detect(string = text, pattern = "survey")
-  # stringr::str_detect(string = text, pattern = "report")
-  # stringr::str_detect(string = text, pattern = "\\(.*\\)")
-  
-  
+  return(res)
 }
 
+test <- data.table::fread("sample_submission.csv")
+
+test_clean <- parallel::mclapply(unique(test$Id),
+                                  read_clean_json,
+                                  mc.cores = parallel::detectCores()) %>%
+  dplyr::bind_rows()
+
+test_res <- parallel::mclapply(unique(test$Id),
+                   predict,
+                   data = test_clean,
+                   train_labels = train_labels,
+                   mc.cores = parallel::detectCores()) %>%
+  dplyr::bind_rows()
+
+fwrite(test_res, 'submission.csv')
+
+                
