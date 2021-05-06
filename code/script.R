@@ -61,7 +61,7 @@ label_clean <- label_df %>%
   dplyr::select(dataset_title, cleaned_title, dataset_label, cleaned_label, 
                 output_label)
 
-read_clean_json <- function(Id) {
+read_clean_json_train <- function(Id) {
   
   publication <- data.table(jsonlite::fromJSON(paste0('train/', Id, '.json')))
   
@@ -77,8 +77,22 @@ read_clean_json <- function(Id) {
   
 }
 
+read_clean_json_test <- function(Id) {
+  
+  publication <- data.table(jsonlite::fromJSON(paste0('train/', Id, '.json')))
+  
+  text <- stringr::str_c(publication$text, collapse = " ") %>% 
+    stringr::str_remove_all(string = ., pattern = "[^A-Za-z0-9]+") %>% 
+    tolower()
+  
+  res <- tibble::tibble(Id = Id, text = text)
+  
+  return(res)
+  
+}
+
 train_clean <- parallel::mclapply(unique(train$Id)[1:10],
-                                  read_clean_json,
+                                  read_clean_json_train,
                                   mc.cores = parallel::detectCores()) %>%
   dplyr::bind_rows()
 
@@ -87,7 +101,8 @@ train <- train %>%
   dplyr::select(-cleaned_label) %>% 
   dplyr::left_join(label_clean, by = c("dataset_title", "dataset_label"))
 
-saveRDS(train, "train.rds")
+#saveRDS(train, "train.rds")
+train <- readRDS("train.rds")
 
 # Rules -------------------------------------------------------------------
 
@@ -140,13 +155,13 @@ get_words_text <- function(x, data, sub, add) {
   word_ind <- set_ind(ind, sub = sub, add = add)
   
   if(nrow(word_ind) > 0) {
-  res <- parallel::mclapply(1:nrow(word_ind),
-                            get_words,
-                            word_ind = word_ind,
-                            temp_text = temp_text,
-                            mc.cores = 1) %>%
-    dplyr::bind_rows() %>% 
-    distinct()
+    res <- parallel::mclapply(1:nrow(word_ind),
+                              get_words,
+                              word_ind = word_ind,
+                              temp_text = temp_text,
+                              mc.cores = 1) %>%
+      dplyr::bind_rows() %>% 
+      distinct()
   } else {
     res <- tibble::tibble()
   }
@@ -156,29 +171,70 @@ get_words_text <- function(x, data, sub, add) {
 }
 
 data <- train %>% 
-  dplyr::distinct(file_name, .keep_all = TRUE)
+  dplyr::distinct(Id, .keep_all = TRUE)
 
 res <- parallel::mclapply(1:nrow(data),
-                         get_words_text,
-                         data = data,
-                         sub = 5,
-                         add = 50,
-                         mc.cores = 8) %>%
+                          get_words_text,
+                          data = data,
+                          sub = 5,
+                          add = 50,
+                          mc.cores = parallel::detectCores()) %>%
   dplyr::bind_rows() %>% 
   distinct()
 
-saveRDS(res, "res.rds")
+# saveRDS(res, "res.rds")
+res <- readRDS("res.rds")
+
+train_labels <- train %>% 
+  dplyr::select(dataset_title, dataset_label, cleaned_title, cleaned_label, output_label) %>% 
+  dplyr::distinct()
 
 new_labels <- res %>% 
   dplyr::mutate(label = stringr::str_remove_all(string = res, pattern = "\\( \\)")) %>% 
   dplyr::mutate(label = stringr::str_replace_all(string = label, pattern = "\\( ", replacement = "\\(")) %>% 
-  dplyr::mutate(label = stringr::str_replace_all(string = label, pattern = "\\) ", replacement = "\\)")) %>% 
+  dplyr::mutate(label = stringr::str_replace_all(string = label, pattern = " \\)", replacement = "\\)")) %>% 
   dplyr::mutate(label = stringr::str_trim(string = label, side = "both")) %>% 
   dplyr::filter(label != "") %>% 
   dplyr::distinct(label, .keep_all = TRUE) %>% 
   dplyr::mutate(char_len = nchar(label)) %>% 
   dplyr::filter(char_len >= 10)
-  
+
+rem_label <- stringr::str_c(c("Trends International Mathematics Science Study",
+                              "National Education Longitudinal Study",
+                              "Education Longitudinal Study",
+                              "Alzheimers Disease NeuroImaging Initiative",
+                              "Early Childhood Longitudinal Study",
+                              "Beginning Postsecondary Student Longitudinal Study"), collapse = "|")
+
+new_label <- stringr::str_c(c("Programme International Student Assessment",
+                              "Progress International Reading Literacy Study",
+                              "National Longitudinal Survey Youth",
+                              "American Community Survey",
+                              "National Longitudinal Survey",
+                              "Early Childhood Longitudinal Study Kindergarten",
+                              "High School Beyond",
+                              "National Center Educational Statistics",
+                              "National Center Education Statistics",
+                              "National Longitudinal Study High School Class",
+                              "National Longitudinal Study High School",
+                              "School Beyond Longitudinal Study",
+                              "Quality Education Data",
+                              "Longitudinal Business Database"), collapse = "|")
+
+my_labels <- gsub('[^A-Za-z0-9]+', ' ', tolower(stringr::str_split(string = new_label, "\\|") %>% unlist()))
+
+oth_label <- "TIMSS|TIMMS|PISA|PIRLS|PIrLS|NELS|NLSY|ACSNLS|NLS|ECLSK|ADNI|HSB|BPS|NCES|QED"
+
+df <- new_labels %>% 
+  dplyr::mutate(label = stringr::str_remove_all(string = label, pattern = stringr::str_c(rem_label, new_label, oth_label, sep = "|"))) %>% 
+  dplyr::filter(label != "") %>% 
+  dplyr::distinct(label, .keep_all = TRUE) %>% 
+  dplyr::mutate(char_len = nchar(label)) %>% 
+  dplyr::filter(char_len >= 10)
+
+
+
+
 # Last step ---------------------------------------------------------------
 
 train_labels <- c(unique(train$cleaned_label))
@@ -190,7 +246,7 @@ predict <- function(Id, data, train_labels){
     dplyr::select(text) %>% 
     dplyr::distinct() %>% 
     dplyr::pull(text)
-
+  
   labels <- vector()
   
   for (label in train_labels) {
@@ -207,17 +263,16 @@ predict <- function(Id, data, train_labels){
 test <- data.table::fread("sample_submission.csv")
 
 test_clean <- parallel::mclapply(unique(test$Id),
-                                  read_clean_json,
-                                  mc.cores = parallel::detectCores()) %>%
+                                 read_clean_json,
+                                 mc.cores = parallel::detectCores()) %>%
   dplyr::bind_rows()
 
 test_res <- parallel::mclapply(unique(test$Id),
-                   predict,
-                   data = test_clean,
-                   train_labels = train_labels,
-                   mc.cores = parallel::detectCores()) %>%
+                               predict,
+                               data = test_clean,
+                               train_labels = train_labels,
+                               mc.cores = parallel::detectCores()) %>%
   dplyr::bind_rows()
 
 fwrite(test_res, 'submission.csv')
 
-                
